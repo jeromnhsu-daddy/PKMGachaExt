@@ -1,0 +1,38 @@
+{
+  "entities": {
+    "Trade": {
+      "title": "Trade",
+      "description": "A trade offer created by a player.",
+      "type": "object",
+      "properties": {
+        "code": { "type": "string", "description": "6-digit unique trade code." },
+        "senderId": { "type": "string", "description": "UID of the player offering the card." },
+        "senderEmail": { "type": "string", "description": "Email of the player offering the card." },
+        "pokemonId": { "type": "number", "description": "ID of the Pokemon card being traded." },
+        "status": { "type": "string", "enum": ["pending", "completed", "cancelled"], "description": "Current status of the trade." },
+        "createdAt": { "type": "string", "format": "date-time", "description": "When the trade was created." },
+        "receiverId": { "type": "string", "description": "UID of the player who accepted the trade." }
+      },
+      "required": ["code", "senderId", "pokemonId", "status", "createdAt"]
+    },
+    "User": {
+      "title": "User",
+      "description": "User profile and collection data.",
+      "type": "object",
+      "properties": {
+        "email": { "type": "string" },
+        "lastLogin": { "type": "string", "format": "date-time" }
+      }
+    }
+  },
+  "firestore": {
+    "/trades/{tradeId}": {
+      "schema": "Trade",
+      "description": "Active and past trade offers."
+    },
+    "/users/{userId}": {
+      "schema": "User",
+      "description": "User metadata."
+    }
+  }
+}

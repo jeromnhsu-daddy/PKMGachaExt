@@ -1,0 +1,57 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    
+    // ===============================================================
+    // Helper Functions
+    // ===============================================================
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+    
+    function isOwner(userId) {
+      return isAuthenticated() && request.auth.uid == userId;
+    }
+
+    function isValidTrade(data) {
+      return data.code is string && data.code.size() == 6 &&
+             data.senderId is string &&
+             data.pokemonId is number &&
+             data.status in ['pending', 'completed', 'cancelled'] &&
+             (data.createdAt is string || data.createdAt is timestamp);
+    }
+
+    // ===============================================================
+    // Rules
+    // ===============================================================
+
+    match /users/{userId} {
+      allow read, write: if isOwner(userId);
+    }
+
+    match /trades/{tradeId} {
+      // Anyone authenticated can read a trade if they know the ID/code
+      // In practice, we query by code
+      allow read: if isAuthenticated();
+      
+      // Create a trade: must be authenticated, senderId must match auth.uid, and data must be valid
+      allow create: if isAuthenticated() && 
+                      request.resource.data.senderId == request.auth.uid &&
+                      isValidTrade(request.resource.data);
+      
+      // Update a trade: 
+      // 1. Owner can cancel it
+      // 2. Another user can complete it (accept it)
+      allow update: if isAuthenticated() && (
+        // Owner cancelling
+        (resource.data.senderId == request.auth.uid && request.resource.data.status == 'cancelled') ||
+        // Receiver accepting
+        (resource.data.status == 'pending' && 
+         request.resource.data.status == 'completed' && 
+         request.resource.data.receiverId == request.auth.uid &&
+         request.resource.data.senderId == resource.data.senderId &&
+         request.resource.data.pokemonId == resource.data.pokemonId)
+      );
+    }
+  }
+}
