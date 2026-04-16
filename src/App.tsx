@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useState, useEffect, useMemo, useCallback, lazy, Suspense } from 'react';
+import React, { useState, useEffect, useMemo, useCallback, lazy, Suspense, useRef } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
 import { 
   Search, 
@@ -178,13 +178,27 @@ function AppContent() {
   const [pendingCloudData, setPendingCloudData] = useState<CollectionState | null>(null);
   const [isSyncReady, setIsSyncReady] = useState(false);
   const [isSyncing, setIsSyncing] = useState(false);
+  const lastLocalActionTime = useRef(0);
+  const isSyncingFromCloud = useRef(false);
+
+  // Track local changes to prevent stale cloud snapshots from reverting them
+  useEffect(() => {
+    if (!isSyncingFromCloud.current) {
+      lastLocalActionTime.current = Date.now();
+    }
+    isSyncingFromCloud.current = false;
+  }, [collection]);
 
   // Auth Listener
   useEffect(() => {
-    const unsubscribe = onAuthStateChanged(auth, (u) => {
+    const unsubscribe = onAuthStateChanged(auth, async (u) => {
       setUser(u);
       setIsAuthLoading(false);
-      if (!u) {
+      if (u) {
+        // If user is already logged in (e.g. page refresh), 
+        // we enable sync immediately to resume the session.
+        setIsSyncReady(true);
+      } else {
         setIsSyncReady(false);
       }
     });
@@ -197,16 +211,23 @@ function AppContent() {
 
     const userDocRef = doc(db, 'users', user.uid);
     const unsubscribe = onSnapshot(userDocRef, (snapshot) => {
+      // 1. Ignore snapshots that contain local pending writes
+      if (snapshot.metadata.hasPendingWrites) return;
+
+      // 2. Protection period: Ignore cloud snapshots for 5 seconds after a local action
+      // to allow the auto-save debounce (2s) and server round-trip to complete.
+      const timeSinceLocalAction = Date.now() - lastLocalActionTime.current;
+      if (timeSinceLocalAction < 5000) {
+        return;
+      }
+
       if (snapshot.exists()) {
         const cloudData = snapshot.data() as CollectionState;
         
-        setIsSyncing(true);
-        setTimeout(() => setIsSyncing(false), 1000);
-
         setCollection(prev => {
           if (!cloudData) return prev;
 
-          // Robust comparison for cards map (sorting keys to ensure order doesn't break comparison)
+          // Robust comparison
           const isCardsEqual = JSON.stringify(Object.entries(cloudData.cards || {}).sort()) === 
                                JSON.stringify(Object.entries(prev.cards || {}).sort());
           
@@ -217,18 +238,19 @@ function AppContent() {
             JSON.stringify(cloudData.inventory || {}) !== JSON.stringify(prev.inventory || {});
 
           if (hasChanges) {
+            // Mark as sync from cloud to avoid triggering lastLocalActionTime update
+            isSyncingFromCloud.current = true;
+            setIsSyncing(true);
+            setTimeout(() => setIsSyncing(false), 1000);
+            
             return {
               ...prev,
               ...cloudData,
-              // Explicitly map fields to ensure React detects changes
-              coins: typeof cloudData.coins === 'number' ? cloudData.coins : prev.coins,
-              cards: cloudData.cards || prev.cards,
-              inventory: cloudData.inventory || prev.inventory,
-              badges: cloudData.badges || prev.badges,
-              hpMap: cloudData.hpMap || prev.hpMap,
-              attackBoosts: cloudData.attackBoosts || prev.attackBoosts,
-              defenseBoosts: cloudData.defenseBoosts || prev.defenseBoosts,
-              transferUses: cloudData.transferUses || prev.transferUses,
+              // Ensure critical fields are updated
+              coins: cloudData.coins ?? prev.coins,
+              cards: cloudData.cards ?? prev.cards,
+              inventory: cloudData.inventory ?? prev.inventory,
+              badges: cloudData.badges ?? prev.badges,
             };
           }
           return prev;
