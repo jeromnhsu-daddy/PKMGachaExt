@@ -177,7 +177,7 @@ export const ShopView: React.FC<ShopViewProps> = ({
             })}
           </div>
         </div>
-      ) : activeTab === 'cards' ? (
+      ) : activeTab === 'items' ? (
         <div className="space-y-8">
           <h3 className="text-2xl font-bold tracking-tight uppercase italic serif">{t('shop.essential')}</h3>
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-8">

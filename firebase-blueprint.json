@@ -21,7 +21,20 @@
       "type": "object",
       "properties": {
         "email": { "type": "string" },
-        "lastLogin": { "type": "string", "format": "date-time" }
+        "lastLogin": { "type": "string", "format": "date-time" },
+        "coins": { "type": "number" },
+        "lastHealTime": { "type": "number" },
+        "badges": { "type": "array", "items": { "type": "string" } },
+        "inventory": { "type": "object" },
+        "lastDailyReward": { "type": "number" },
+        "currentRegion": { "type": "number" },
+        "unlockedRegions": { "type": "array", "items": { "type": "number" } },
+        "isInfiniteCoins": { "type": "boolean" },
+        "attackBoosts": { "type": "object" },
+        "defenseBoosts": { "type": "object" },
+        "transferUses": { "type": "object" },
+        "hpMap": { "type": "object" },
+        "cards": { "type": "object", "description": "Map of card ID to count" }
       }
     }
   },

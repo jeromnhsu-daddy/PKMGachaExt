@@ -14,7 +14,9 @@ import {
   X,
   ArrowRight,
   Search,
-  Lock
+  Lock,
+  ChevronLeft,
+  ChevronRight
 } from 'lucide-react';
 import { useLanguage } from '../contexts/LanguageContext';
 import { auth, db } from '../lib/firebase';
@@ -64,6 +66,10 @@ export const TradeView: React.FC<TradeViewProps> = ({ collection: userInventory,
   const [user, setUser] = useState<User | null>(null);
   const [loading, setLoading] = useState(true);
   const [activeTab, setActiveTab] = useState<'create' | 'receive' | 'history'>('create');
+  const [historySubTab, setHistorySubTab] = useState<'sent' | 'received'>('sent');
+  const [currentPage, setCurrentPage] = useState(1);
+  const [totalCount, setTotalCount] = useState(0);
+  const itemsPerPage = 10;
   
   // Create Trade State
   const [selectedCardId, setSelectedCardId] = useState<string | null>(null);
@@ -98,23 +104,32 @@ export const TradeView: React.FC<TradeViewProps> = ({ collection: userInventory,
   useEffect(() => {
     if (!user) return;
 
+    const baseQuery = collection(db, 'trades');
     const q = query(
-      collection(db, 'trades'),
-      where('senderId', '==', user.uid),
-      orderBy('createdAt', 'desc'),
-      limit(10)
+      baseQuery,
+      where(historySubTab === 'sent' ? 'senderId' : 'receiverId', '==', user.uid),
+      orderBy('createdAt', 'desc')
     );
 
+    // We fetch all for now to handle pagination in memory easily, 
+    // or we could do real firestore pagination. 
+    // Given the request for "sliding" and "pagination", let's fetch a reasonable amount.
     const unsubscribe = onSnapshot(q, (snapshot) => {
       const tradeData = snapshot.docs.map(doc => ({
         id: doc.id,
         ...doc.data()
       })) as TradeOffer[];
       setTrades(tradeData);
+      setTotalCount(tradeData.length);
     });
 
     return () => unsubscribe();
-  }, [user]);
+  }, [user, historySubTab]);
+
+  // Reset page when switching tabs
+  useEffect(() => {
+    setCurrentPage(1);
+  }, [historySubTab, activeTab]);
 
   const handleLogin = async () => {
     const provider = new GoogleAuthProvider();
@@ -495,70 +510,160 @@ export const TradeView: React.FC<TradeViewProps> = ({ collection: userInventory,
 
         {activeTab === 'history' && (
           <div className="space-y-6">
-            <h3 className="text-3xl font-bold tracking-tighter italic serif uppercase">{t('trade.history.title')}</h3>
+            <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4">
+              <h3 className="text-3xl font-bold tracking-tighter italic serif uppercase">{t('trade.history.title')}</h3>
+              
+              <div className="flex bg-slate-100 p-1 rounded-xl border border-[#141414]/5">
+                <button
+                  onClick={() => setHistorySubTab('sent')}
+                  className={`px-4 py-2 rounded-lg text-xs font-bold uppercase tracking-widest transition-all ${
+                    historySubTab === 'sent' ? 'bg-white shadow-sm text-purple-600' : 'text-slate-400 hover:text-slate-600'
+                  }`}
+                >
+                  {t('trade.history.sent')}
+                </button>
+                <button
+                  onClick={() => setHistorySubTab('received')}
+                  className={`px-4 py-2 rounded-lg text-xs font-bold uppercase tracking-widest transition-all ${
+                    historySubTab === 'received' ? 'bg-white shadow-sm text-purple-600' : 'text-slate-400 hover:text-slate-600'
+                  }`}
+                >
+                  {t('trade.history.received')}
+                </button>
+              </div>
+            </div>
             
-            <div className="space-y-4">
-              {trades.length === 0 ? (
-                <div className="text-center py-20 opacity-30">
-                  <History className="w-12 h-12 mx-auto mb-4" />
-                  <p className="font-bold uppercase tracking-widest">{t('trade.history.empty')}</p>
-                </div>
-              ) : (
-                trades.map(trade => {
-                  const pokemon = getBasePokemon(trade.pokemonId);
-                  return (
-                    <div key={trade.id} className="flex items-center justify-between p-6 bg-slate-50 rounded-[2rem] border-2 border-[#141414]/5">
-                      <div className="flex items-center gap-6">
-                        <div className="w-16 h-16 bg-white rounded-2xl border-2 border-[#141414]/5 flex items-center justify-center">
-                          <img 
-                            src={getPokemonImage(trade.pokemonId)}
-                            alt={pokemon?.name}
-                            className="w-12 h-12 object-contain"
-                            referrerPolicy="no-referrer"
-                          />
-                        </div>
-                        <div>
-                          <div className="flex items-center gap-3 mb-1">
-                            <h4 className="font-bold text-lg">{t(`pokemon.${trade.pokemonId}`)}</h4>
-                            <span className="text-[10px] font-mono bg-[#141414] text-white px-2 py-0.5 rounded uppercase tracking-widest">
-                              {trade.code}
-                            </span>
-                          </div>
-                          <p className="text-xs opacity-50 font-mono">
-                            {trade.createdAt?.toDate().toLocaleString() || 'Just now'}
-                          </p>
-                        </div>
-                      </div>
+            <div className="space-y-4 min-h-[400px] flex flex-col">
+              <div className="flex-1 space-y-4">
+                <AnimatePresence mode="wait">
+                  {trades.length === 0 ? (
+                    <motion.div 
+                      key="empty"
+                      initial={{ opacity: 0 }}
+                      animate={{ opacity: 1 }}
+                      exit={{ opacity: 0 }}
+                      className="text-center py-20 opacity-30"
+                    >
+                      <History className="w-12 h-12 mx-auto mb-4" />
+                      <p className="font-bold uppercase tracking-widest">{t('trade.history.empty')}</p>
+                    </motion.div>
+                  ) : (
+                    <motion.div
+                      key={`${historySubTab}-${currentPage}`}
+                      initial={{ opacity: 0, x: 20 }}
+                      animate={{ opacity: 1, x: 0 }}
+                      exit={{ opacity: 0, x: -20 }}
+                      transition={{ duration: 0.2 }}
+                      className="space-y-4"
+                    >
+                      {trades
+                        .slice((currentPage - 1) * itemsPerPage, currentPage * itemsPerPage)
+                        .map(trade => {
+                          const pokemon = getBasePokemon(trade.pokemonId);
+                          return (
+                            <div key={trade.id} className="flex items-center justify-between p-6 bg-slate-50 rounded-[2rem] border-2 border-[#141414]/5 hover:border-purple-200 transition-colors">
+                              <div className="flex items-center gap-6">
+                                <div className="w-16 h-16 bg-white rounded-2xl border-2 border-[#141414]/5 flex items-center justify-center">
+                                  <img 
+                                    src={getPokemonImage(trade.pokemonId)}
+                                    alt={pokemon?.name}
+                                    className="w-12 h-12 object-contain"
+                                    referrerPolicy="no-referrer"
+                                  />
+                                </div>
+                                <div>
+                                  <div className="flex items-center gap-3 mb-1">
+                                    <h4 className="font-bold text-lg">{t(`pokemon.${trade.pokemonId}`)}</h4>
+                                    <span className="text-[10px] font-mono bg-[#141414] text-white px-2 py-0.5 rounded uppercase tracking-widest">
+                                      {trade.code}
+                                    </span>
+                                  </div>
+                                  <div className="flex flex-col gap-1">
+                                    <p className="text-xs opacity-50 font-mono">
+                                      {trade.createdAt?.toDate().toLocaleString() || 'Just now'}
+                                    </p>
+                                    <p className="text-[10px] opacity-40 font-bold uppercase tracking-tighter">
+                                      {historySubTab === 'sent' 
+                                        ? (trade.receiverId ? `To: ${trade.receiverId.substring(0, 8)}...` : 'Status: Pending')
+                                        : `From: ${trade.senderEmail || trade.senderId.substring(0, 8) + '...'}`
+                                      }
+                                    </p>
+                                  </div>
+                                </div>
+                              </div>
 
-                      <div className="flex items-center gap-4">
-                        <span className={`px-4 py-1.5 rounded-full text-[10px] font-bold uppercase tracking-widest ${
-                          trade.status === 'completed' ? 'bg-emerald-100 text-emerald-700' :
-                          trade.status === 'cancelled' ? 'bg-red-100 text-red-700' :
-                          'bg-purple-100 text-purple-700'
-                        }`}>
-                          {t(`trade.status.${trade.status}`)}
-                        </span>
-                        {trade.status === 'pending' && (
-                          <button 
-                            onClick={async () => {
-                              await updateDoc(doc(db, 'trades', trade.id), { status: 'cancelled' });
-                              // Give card back to user
-                              const newCards = { ...userInventory.cards };
-                              newCards[trade.pokemonId] = (newCards[trade.pokemonId] || 0) + 1;
-                              onUpdateCollection({
-                                ...userInventory,
-                                cards: newCards
-                              });
-                            }}
-                            className="p-2 hover:bg-red-50 rounded-full transition-colors text-red-400 hover:text-red-600"
-                          >
-                            <X className="w-5 h-5" />
-                          </button>
-                        )}
-                      </div>
-                    </div>
-                  );
-                })
+                              <div className="flex items-center gap-4">
+                                <span className={`px-4 py-1.5 rounded-full text-[10px] font-bold uppercase tracking-widest ${
+                                  trade.status === 'completed' ? 'bg-emerald-100 text-emerald-700' :
+                                  trade.status === 'cancelled' ? 'bg-red-100 text-red-700' :
+                                  'bg-purple-100 text-purple-700'
+                                }`}>
+                                  {t(`trade.status.${trade.status}`)}
+                                </span>
+                                {trade.status === 'pending' && historySubTab === 'sent' && (
+                                  <button 
+                                    onClick={async () => {
+                                      await updateDoc(doc(db, 'trades', trade.id), { status: 'cancelled' });
+                                      // Give card back to user
+                                      const newCards = { ...userInventory.cards };
+                                      newCards[trade.pokemonId] = (newCards[trade.pokemonId] || 0) + 1;
+                                      onUpdateCollection({
+                                        ...userInventory,
+                                        cards: newCards
+                                      });
+                                    }}
+                                    className="p-2 hover:bg-red-50 rounded-full transition-colors text-red-400 hover:text-red-600"
+                                  >
+                                    <X className="w-5 h-5" />
+                                  </button>
+                                )}
+                              </div>
+                            </div>
+                          );
+                        })}
+                    </motion.div>
+                  )}
+                </AnimatePresence>
+              </div>
+
+              {totalCount > itemsPerPage && (
+                <div className="flex items-center justify-between pt-6 border-t border-[#141414]/5">
+                  <p className="text-xs font-bold text-slate-400 uppercase tracking-widest">
+                    {t('trade.history.page')
+                      .replace('{current}', currentPage.toString())
+                      .replace('{total}', Math.ceil(totalCount / itemsPerPage).toString())}
+                  </p>
+                  <div className="flex gap-2">
+                    <button
+                      disabled={currentPage === 1}
+                      onClick={() => {
+                        setCurrentPage(prev => prev - 1);
+                        if (playSound) playSound('click');
+                      }}
+                      className={`p-2 rounded-xl border-2 transition-all ${
+                        currentPage === 1 
+                          ? 'opacity-20 cursor-not-allowed border-transparent' 
+                          : 'border-[#141414] hover:bg-slate-50'
+                      }`}
+                    >
+                      <ChevronLeft className="w-5 h-5" />
+                    </button>
+                    <button
+                      disabled={currentPage >= Math.ceil(totalCount / itemsPerPage)}
+                      onClick={() => {
+                        setCurrentPage(prev => prev + 1);
+                        if (playSound) playSound('click');
+                      }}
+                      className={`p-2 rounded-xl border-2 transition-all ${
+                        currentPage >= Math.ceil(totalCount / itemsPerPage)
+                          ? 'opacity-20 cursor-not-allowed border-transparent' 
+                          : 'border-[#141414] hover:bg-slate-50'
+                      }`}
+                    >
+                      <ChevronRight className="w-5 h-5" />
+                    </button>
+                  </div>
+                </div>
               )}
             </div>
           </div>

@@ -33,6 +33,10 @@ import { Card } from './components/Card';
 import { LanguageProvider, useLanguage } from './contexts/LanguageContext';
 import { Language } from './i18n';
 
+import { auth, db } from './lib/firebase';
+import { onAuthStateChanged, signInWithPopup, GoogleAuthProvider, signOut, User as FirebaseUser } from 'firebase/auth';
+import { doc, getDoc, setDoc, onSnapshot, serverTimestamp } from 'firebase/firestore';
+
 // Lazy load views for better performance
 const DrawView = lazy(() => import('./components/DrawView').then(m => ({ default: m.DrawView })));
 const BattleView = lazy(() => import('./components/BattleView').then(m => ({ default: m.BattleView })));
@@ -166,6 +170,111 @@ function AppContent() {
   const [selectedPokemon, setSelectedPokemon] = useState<Pokemon | null>(null);
   const [healingPokemonId, setHealingPokemonId] = useState<number | null>(null);
   const [isMuted, setIsMuted] = useState(false);
+  const [user, setUser] = useState<FirebaseUser | null>(null);
+  const [isAuthLoading, setIsAuthLoading] = useState(true);
+  const [showSyncModal, setShowSyncModal] = useState(false);
+  const [pendingCloudData, setPendingCloudData] = useState<CollectionState | null>(null);
+
+  // Auth Listener
+  useEffect(() => {
+    const unsubscribe = onAuthStateChanged(auth, (u) => {
+      setUser(u);
+      setIsAuthLoading(false);
+    });
+    return () => unsubscribe();
+  }, []);
+
+  // Cloud Sync Listener
+  useEffect(() => {
+    if (!user) return;
+
+    const userDocRef = doc(db, 'users', user.uid);
+    const unsubscribe = onSnapshot(userDocRef, (snapshot) => {
+      if (snapshot.exists()) {
+        const cloudData = snapshot.data() as CollectionState;
+        // Only update if cloud data is different from local state to avoid loops
+        // In a real app, we'd use a timestamp or versioning
+      }
+    });
+
+    return () => unsubscribe();
+  }, [user]);
+
+  // Handle Login
+  const handleLogin = async () => {
+    try {
+      const provider = new GoogleAuthProvider();
+      const result = await signInWithPopup(auth, provider);
+      const loggedInUser = result.user;
+
+      // Check for existing cloud data
+      const userDocRef = doc(db, 'users', loggedInUser.uid);
+      const snapshot = await getDoc(userDocRef);
+
+      if (snapshot.exists()) {
+        const cloudData = snapshot.data() as CollectionState;
+        setPendingCloudData(cloudData);
+        setShowSyncModal(true);
+      } else {
+        // New cloud user, upload current local progress
+        await setDoc(userDocRef, {
+          ...collection,
+          email: loggedInUser.email,
+          lastLogin: serverTimestamp()
+        });
+        setToast({ message: t('auth.sync_success'), type: 'success' });
+      }
+    } catch (error) {
+      console.error('Login failed:', error);
+      setToast({ message: t('auth.login_failed'), type: 'error' });
+    }
+  };
+
+  const handleLogout = async () => {
+    try {
+      await signOut(auth);
+      setToast({ message: t('auth.logout_success'), type: 'success' });
+    } catch (error) {
+      setToast({ message: t('auth.logout_failed'), type: 'error' });
+    }
+  };
+
+  const resolveSync = async (choice: 'local' | 'cloud') => {
+    if (!user || !pendingCloudData) return;
+    
+    const userDocRef = doc(db, 'users', user.uid);
+    if (choice === 'local') {
+      // Upload local to cloud
+      await setDoc(userDocRef, {
+        ...collection,
+        email: user.email,
+        lastLogin: serverTimestamp()
+      });
+      setToast({ message: t('auth.uploaded_local'), type: 'success' });
+    } else {
+      // Download cloud to local
+      setCollection(pendingCloudData);
+      setToast({ message: t('auth.downloaded_cloud'), type: 'success' });
+    }
+    setShowSyncModal(false);
+    setPendingCloudData(null);
+  };
+
+  // Auto-save to cloud if logged in
+  useEffect(() => {
+    if (!user || isAuthLoading) return;
+
+    const timer = setTimeout(async () => {
+      const userDocRef = doc(db, 'users', user.uid);
+      await setDoc(userDocRef, {
+        ...collection,
+        email: user.email,
+        lastLogin: serverTimestamp()
+      }, { merge: true });
+    }, 2000); // Debounce saves
+
+    return () => clearTimeout(timer);
+  }, [collection, user, isAuthLoading]);
 
   // Set activeTeamGen to current region when entering team select
   useEffect(() => {
@@ -774,9 +883,31 @@ function AppContent() {
     setDrawId(prev => prev + 1);
     
     setTimeout(() => {
-      const randomIndex = Math.floor(Math.random() * regionPokemon.length);
-      const randomId = regionPokemon[randomIndex].id;
-      const newPokemon = getPokemonWithBoosts(randomId);
+      // Dynamic legendary probability logic
+      const regionCollectedCount = regionPokemon.filter(p => collection.cards[p.id]).length;
+      const isCollectionOverHalf = regionCollectedCount >= (regionPokemon.length / 2);
+      
+      let selectedId: number;
+      const legendaryInRegion = regionPokemon.filter(p => p.rarity === 'Legendary');
+      const nonLegendaryInRegion = regionPokemon.filter(p => p.rarity !== 'Legendary');
+
+      // If collection < 50%, legendary chance is capped at 1%
+      if (!isCollectionOverHalf && legendaryInRegion.length > 0 && nonLegendaryInRegion.length > 0) {
+        const roll = Math.random();
+        if (roll < 0.01) {
+          // 1% chance to get a legendary
+          selectedId = legendaryInRegion[Math.floor(Math.random() * legendaryInRegion.length)].id;
+        } else {
+          // 99% chance to get a non-legendary
+          selectedId = nonLegendaryInRegion[Math.floor(Math.random() * nonLegendaryInRegion.length)].id;
+        }
+      } else {
+        // Original logic: uniform distribution
+        const randomIndex = Math.floor(Math.random() * regionPokemon.length);
+        selectedId = regionPokemon[randomIndex].id;
+      }
+
+      const newPokemon = getPokemonWithBoosts(selectedId);
       setCurrentCard(newPokemon);
       setIsDrawing(false);
 
@@ -789,15 +920,15 @@ function AppContent() {
         setCollection(prev => ({
           ...prev,
           coins: prev.isInfiniteCoins ? prev.coins : prev.coins - 100,
-          cards: { ...prev.cards, [randomId]: (prev.cards[randomId] || 0) + 1 },
-          hpMap: { ...prev.hpMap, [randomId]: newPokemon.hp }
+          cards: { ...prev.cards, [selectedId]: (prev.cards[selectedId] || 0) + 1 },
+          hpMap: { ...prev.hpMap, [selectedId]: newPokemon.hp }
         }));
         setToast({ message: t('draw.new', { name: t(`pokemon.${newPokemon.id}`) }), type: 'success' });
         
         // Reset effect after some time
         setTimeout(() => setDrawEffect('none'), 3000);
-      }, 400); // Faster flip start
-    }, 400); // Faster draw preparation
+      }, 400); 
+    }, 400); 
   };
 
   const claimDailyReward = () => {
@@ -892,9 +1023,25 @@ function AppContent() {
     });
 
     const opponentTeam = Array.from({ length: team.length }, () => {
-      const randomIndex = Math.floor(Math.random() * regionPokemon.length);
-      const randomId = regionPokemon[randomIndex].id;
-      return getPokemonData(randomId);
+      const regionCollectedCount = regionPokemon.filter(p => collection.cards[p.id]).length;
+      const isCollectionOverHalf = regionCollectedCount >= (regionPokemon.length / 2);
+      
+      const legendaryInRegion = regionPokemon.filter(p => p.rarity === 'Legendary');
+      const nonLegendaryInRegion = regionPokemon.filter(p => p.rarity !== 'Legendary');
+
+      let selectedId: number;
+      if (!isCollectionOverHalf && legendaryInRegion.length > 0 && nonLegendaryInRegion.length > 0) {
+        const roll = Math.random();
+        if (roll < 0.01) {
+          selectedId = legendaryInRegion[Math.floor(Math.random() * legendaryInRegion.length)].id;
+        } else {
+          selectedId = nonLegendaryInRegion[Math.floor(Math.random() * nonLegendaryInRegion.length)].id;
+        }
+      } else {
+        const randomIndex = Math.floor(Math.random() * regionPokemon.length);
+        selectedId = regionPokemon[randomIndex].id;
+      }
+      return getPokemonData(selectedId);
     });
 
     // Consume transfer uses
@@ -1258,9 +1405,25 @@ function AppContent() {
     });
 
     const newShopCards = Array.from({ length: 6 }, () => {
-      const randomIndex = Math.floor(Math.random() * regionPokemon.length);
-      const randomId = regionPokemon[randomIndex].id;
-      return getPokemonData(randomId);
+      const regionCollectedCount = regionPokemon.filter(p => collection.cards[p.id]).length;
+      const isCollectionOverHalf = regionCollectedCount >= (regionPokemon.length / 2);
+      
+      const legendaryInRegion = regionPokemon.filter(p => p.rarity === 'Legendary');
+      const nonLegendaryInRegion = regionPokemon.filter(p => p.rarity !== 'Legendary');
+
+      let selectedId: number;
+      if (!isCollectionOverHalf && legendaryInRegion.length > 0 && nonLegendaryInRegion.length > 0) {
+        const roll = Math.random();
+        if (roll < 0.01) {
+          selectedId = legendaryInRegion[Math.floor(Math.random() * legendaryInRegion.length)].id;
+        } else {
+          selectedId = nonLegendaryInRegion[Math.floor(Math.random() * nonLegendaryInRegion.length)].id;
+        }
+      } else {
+        const randomIndex = Math.floor(Math.random() * regionPokemon.length);
+        selectedId = regionPokemon[randomIndex].id;
+      }
+      return getPokemonData(selectedId);
     });
     setShopCards(newShopCards);
   };
@@ -1504,6 +1667,21 @@ function AppContent() {
               {collection.isInfiniteCoins ? '∞' : collection.coins}
             </span>
           </div>
+
+          {/* Auth Button */}
+          {!isAuthLoading && (
+            <button
+              onClick={user ? handleLogout : handleLogin}
+              className={`px-3 md:px-4 py-1.5 md:py-2 rounded-full text-[10px] md:text-xs font-bold transition-all flex items-center gap-2 shadow-md sm:shadow-none ${
+                user 
+                  ? 'bg-emerald-500 text-white border-2 border-emerald-400' 
+                  : 'bg-white text-[#141414] border-2 border-[#141414] hover:bg-slate-50'
+              }`}
+            >
+              <Lock className={`w-3 h-3 ${user ? 'fill-white' : ''}`} />
+              <span className="hidden xs:inline">{user ? t('auth.logout') : t('auth.login')}</span>
+            </button>
+          )}
           <div className="hidden lg:block">
             <div className="flex justify-between text-[10px] font-mono mb-1">
               <span className="uppercase">{t(`region.${collection.currentRegion || 1}`)}</span>
@@ -2323,16 +2501,32 @@ function AppContent() {
                   <p className="text-sm opacity-60 font-mono mt-2 uppercase">{t('collection.subtitle')}</p>
                   
                   {collection.badges.length > 0 && (
-                    <div className="flex gap-2 mt-4">
-                      {GYMS.filter(g => collection.badges.includes(g.badge)).map(gym => (
-                        <div 
-                          key={gym.id} 
-                          title={gym.badge}
-                          className="w-10 h-10 rounded-full bg-yellow-400 border-2 border-yellow-600 flex items-center justify-center text-lg shadow-lg hover:scale-110 transition-transform cursor-help"
-                        >
-                          {gym.badgeIcon}
-                        </div>
-                      ))}
+                    <div className="mt-6 space-y-4">
+                      {[1, 2, 3, 4].map(regionId => {
+                        const regionBadges = GYMS.filter(g => g.regionId === regionId && collection.badges.includes(g.badge));
+                        if (regionBadges.length === 0) return null;
+                        
+                        return (
+                          <div key={regionId} className="space-y-2">
+                            <p className="text-[10px] font-bold opacity-40 uppercase tracking-widest flex items-center gap-2">
+                              <span className="w-4 h-[1px] bg-current opacity-20"></span>
+                              {t(`region.${regionId}`)}
+                              <span className="flex-1 h-[1px] bg-current opacity-20"></span>
+                            </p>
+                            <div className="flex flex-wrap gap-2">
+                              {regionBadges.map(gym => (
+                                <div 
+                                  key={gym.id} 
+                                  title={gym.badge}
+                                  className="w-10 h-10 rounded-full bg-yellow-400 border-2 border-yellow-600 flex items-center justify-center text-lg shadow-lg hover:scale-110 transition-transform cursor-help shrink-0"
+                                >
+                                  {gym.badgeIcon}
+                                </div>
+                              ))}
+                            </div>
+                          </div>
+                        );
+                      })}
                     </div>
                   )}
                 </div>
@@ -3599,7 +3793,56 @@ function AppContent() {
         )}
       </AnimatePresence>
 
-      {/* Custom Styles for 3D Flip */}
+      {/* Sync Conflict Modal */}
+      <AnimatePresence>
+        {showSyncModal && (
+          <div className="fixed inset-0 z-[600] flex items-center justify-center p-4">
+            <motion.div 
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              className="absolute inset-0 bg-[#141414]/80 backdrop-blur-md"
+            />
+            <motion.div 
+              initial={{ opacity: 0, scale: 0.9, y: 20 }}
+              animate={{ opacity: 1, scale: 1, y: 0 }}
+              exit={{ opacity: 0, scale: 0.9, y: 20 }}
+              className="relative w-full max-w-md bg-white rounded-3xl border-4 border-[#141414] shadow-2xl p-8"
+            >
+              <div className="flex items-center gap-4 mb-6">
+                <div className="w-12 h-12 bg-blue-100 rounded-full flex items-center justify-center">
+                  <RefreshCw className="w-6 h-6 text-blue-600" />
+                </div>
+                <div>
+                  <h2 className="text-2xl font-bold uppercase tracking-tighter italic serif">{t('auth.sync_title')}</h2>
+                  <p className="text-xs opacity-60 font-mono uppercase">{t('auth.sync_subtitle')}</p>
+                </div>
+              </div>
+
+              <p className="text-sm mb-8 leading-relaxed">
+                {t('auth.sync_desc')}
+              </p>
+
+              <div className="grid grid-cols-1 gap-4">
+                <button
+                  onClick={() => resolveSync('cloud')}
+                  className="w-full p-4 bg-blue-500 text-white rounded-2xl font-bold uppercase tracking-widest hover:bg-blue-600 transition-all flex flex-col items-center gap-1"
+                >
+                  <span>{t('auth.use_cloud')}</span>
+                  <span className="text-[8px] opacity-70 font-normal">({t('auth.cloud_info', { coins: pendingCloudData?.coins, cards: Object.keys(pendingCloudData?.cards || {}).length })})</span>
+                </button>
+                <button
+                  onClick={() => resolveSync('local')}
+                  className="w-full p-4 bg-white text-[#141414] border-2 border-[#141414] rounded-2xl font-bold uppercase tracking-widest hover:bg-slate-50 transition-all flex flex-col items-center gap-1"
+                >
+                  <span>{t('auth.use_local')}</span>
+                  <span className="text-[8px] opacity-50 font-normal">({t('auth.local_info', { coins: collection.coins, cards: Object.keys(collection.cards).length })})</span>
+                </button>
+              </div>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
       <style dangerouslySetInnerHTML={{ __html: `
         .perspective-1000 {
           perspective: 1000px;

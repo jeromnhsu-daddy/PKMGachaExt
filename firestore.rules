@@ -3,6 +3,40 @@ service cloud.firestore {
   match /databases/{database}/documents {
     
     // ===============================================================
+    // Assumed Data Model
+    // ===============================================================
+    //
+    // Collection: users
+    // Fields:
+    //   - email: string (required)
+    //   - lastLogin: timestamp (required)
+    //   - coins: number (required)
+    //   - lastHealTime: number (required)
+    //   - badges: list of strings (required)
+    //   - inventory: map (required)
+    //   - lastDailyReward: number (required)
+    //   - currentRegion: number (required)
+    //   - unlockedRegions: list of numbers (required)
+    //   - isInfiniteCoins: bool (required)
+    //   - attackBoosts: map (required)
+    //   - defenseBoosts: map (required)
+    //   - transferUses: map (required)
+    //   - hpMap: map (required)
+    //   - cards: map (required)
+    //
+    // Collection: trades
+    // Fields:
+    //   - code: string (6 chars, required)
+    //   - senderId: string (UID, required)
+    //   - senderEmail: string (required)
+    //   - pokemonId: number (required)
+    //   - status: string (pending|completed|cancelled, required)
+    //   - createdAt: timestamp (required)
+    //   - receiverId: string (UID, optional)
+    //
+    // ===============================================================
+
+    // ===============================================================
     // Helper Functions
     // ===============================================================
     function isAuthenticated() {
@@ -13,12 +47,25 @@ service cloud.firestore {
       return isAuthenticated() && request.auth.uid == userId;
     }
 
+    function isValidEmail(email) {
+      return email is string && email.matches("^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\\.[a-zA-Z]{2,}$");
+    }
+
+    function isValidUser(data) {
+      return data.email is string && isValidEmail(data.email) &&
+             data.coins is number && data.coins >= 0 &&
+             data.badges is list && data.badges.size() <= 100 &&
+             data.inventory is map && data.inventory.size() <= 200 &&
+             data.cards is map && data.cards.size() <= 1000 &&
+             data.unlockedRegions is list && data.unlockedRegions.size() <= 10;
+    }
+
     function isValidTrade(data) {
       return data.code is string && data.code.size() == 6 &&
              data.senderId is string &&
              data.pokemonId is number &&
              data.status in ['pending', 'completed', 'cancelled'] &&
-             (data.createdAt is string || data.createdAt is timestamp);
+             data.createdAt is timestamp;
     }
 
     // ===============================================================
@@ -26,31 +73,26 @@ service cloud.firestore {
     // ===============================================================
 
     match /users/{userId} {
-      allow read, write: if isOwner(userId);
+      allow read: if isOwner(userId);
+      allow create: if isOwner(userId) && isValidUser(request.resource.data);
+      allow update: if isOwner(userId) && isValidUser(request.resource.data);
     }
 
     match /trades/{tradeId} {
-      // Anyone authenticated can read a trade if they know the ID/code
-      // In practice, we query by code
       allow read: if isAuthenticated();
       
-      // Create a trade: must be authenticated, senderId must match auth.uid, and data must be valid
       allow create: if isAuthenticated() && 
                       request.resource.data.senderId == request.auth.uid &&
                       isValidTrade(request.resource.data);
       
-      // Update a trade: 
-      // 1. Owner can cancel it
-      // 2. Another user can complete it (accept it)
       allow update: if isAuthenticated() && (
         // Owner cancelling
-        (resource.data.senderId == request.auth.uid && request.resource.data.status == 'cancelled') ||
+        (resource.data.senderId == request.auth.uid && request.resource.data.status == 'cancelled' && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status'])) ||
         // Receiver accepting
         (resource.data.status == 'pending' && 
          request.resource.data.status == 'completed' && 
          request.resource.data.receiverId == request.auth.uid &&
-         request.resource.data.senderId == resource.data.senderId &&
-         request.resource.data.pokemonId == resource.data.pokemonId)
+         request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status', 'receiverId']))
       );
     }
   }
