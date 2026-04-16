@@ -23,7 +23,9 @@ import {
   Gift,
   Lock,
   Settings,
-  Terminal
+  Terminal,
+  Cloud,
+  CloudOff
 } from 'lucide-react';
 import { POKEMON_NAMES, getPokemonImage, getPokemonData, TYPE_EFFECTIVENESS, EVOLUTION_MAP, ARENAS, GYMS, ALL_POKEMON, getGeneration } from './constants';
 import { SHOP_ITEMS } from './constants/items';
@@ -35,7 +37,7 @@ import { Language } from './i18n';
 
 import { auth, db } from './lib/firebase';
 import { onAuthStateChanged, signInWithPopup, GoogleAuthProvider, signOut, User as FirebaseUser } from 'firebase/auth';
-import { doc, getDoc, setDoc, onSnapshot, serverTimestamp } from 'firebase/firestore';
+import { doc, getDoc, setDoc, updateDoc, onSnapshot, serverTimestamp } from 'firebase/firestore';
 
 // Lazy load views for better performance
 const DrawView = lazy(() => import('./components/DrawView').then(m => ({ default: m.DrawView })));
@@ -174,31 +176,68 @@ function AppContent() {
   const [isAuthLoading, setIsAuthLoading] = useState(true);
   const [showSyncModal, setShowSyncModal] = useState(false);
   const [pendingCloudData, setPendingCloudData] = useState<CollectionState | null>(null);
+  const [isSyncReady, setIsSyncReady] = useState(false);
+  const [isSyncing, setIsSyncing] = useState(false);
 
   // Auth Listener
   useEffect(() => {
     const unsubscribe = onAuthStateChanged(auth, (u) => {
       setUser(u);
       setIsAuthLoading(false);
+      if (!u) {
+        setIsSyncReady(false);
+      }
     });
     return () => unsubscribe();
   }, []);
 
   // Cloud Sync Listener
   useEffect(() => {
-    if (!user) return;
+    if (!user || !isSyncReady) return;
 
     const userDocRef = doc(db, 'users', user.uid);
     const unsubscribe = onSnapshot(userDocRef, (snapshot) => {
       if (snapshot.exists()) {
         const cloudData = snapshot.data() as CollectionState;
-        // Only update if cloud data is different from local state to avoid loops
-        // In a real app, we'd use a timestamp or versioning
+        
+        setIsSyncing(true);
+        setTimeout(() => setIsSyncing(false), 1000);
+
+        setCollection(prev => {
+          if (!cloudData) return prev;
+
+          // Robust comparison for cards map (sorting keys to ensure order doesn't break comparison)
+          const isCardsEqual = JSON.stringify(Object.entries(cloudData.cards || {}).sort()) === 
+                               JSON.stringify(Object.entries(prev.cards || {}).sort());
+          
+          const hasChanges = 
+            !isCardsEqual ||
+            cloudData.coins !== prev.coins ||
+            (cloudData.badges?.length || 0) !== (prev.badges?.length || 0) ||
+            JSON.stringify(cloudData.inventory || {}) !== JSON.stringify(prev.inventory || {});
+
+          if (hasChanges) {
+            return {
+              ...prev,
+              ...cloudData,
+              // Explicitly map fields to ensure React detects changes
+              coins: typeof cloudData.coins === 'number' ? cloudData.coins : prev.coins,
+              cards: cloudData.cards || prev.cards,
+              inventory: cloudData.inventory || prev.inventory,
+              badges: cloudData.badges || prev.badges,
+              hpMap: cloudData.hpMap || prev.hpMap,
+              attackBoosts: cloudData.attackBoosts || prev.attackBoosts,
+              defenseBoosts: cloudData.defenseBoosts || prev.defenseBoosts,
+              transferUses: cloudData.transferUses || prev.transferUses,
+            };
+          }
+          return prev;
+        });
       }
     });
 
     return () => unsubscribe();
-  }, [user]);
+  }, [user, isSyncReady]);
 
   // Handle Login
   const handleLogin = async () => {
@@ -215,6 +254,7 @@ function AppContent() {
         const cloudData = snapshot.data() as CollectionState;
         setPendingCloudData(cloudData);
         setShowSyncModal(true);
+        setIsSyncReady(false); // Lock sync until user decides
       } else {
         // New cloud user, upload current local progress
         await setDoc(userDocRef, {
@@ -222,6 +262,7 @@ function AppContent() {
           email: loggedInUser.email,
           lastLogin: serverTimestamp()
         });
+        setIsSyncReady(true);
         setToast({ message: t('auth.sync_success'), type: 'success' });
       }
     } catch (error) {
@@ -256,25 +297,35 @@ function AppContent() {
       setCollection(pendingCloudData);
       setToast({ message: t('auth.downloaded_cloud'), type: 'success' });
     }
+    setIsSyncReady(true); // Unlock sync
     setShowSyncModal(false);
     setPendingCloudData(null);
   };
 
   // Auto-save to cloud if logged in
   useEffect(() => {
-    if (!user || isAuthLoading) return;
+    if (!user || isAuthLoading || !isSyncReady) return;
 
     const timer = setTimeout(async () => {
-      const userDocRef = doc(db, 'users', user.uid);
-      await setDoc(userDocRef, {
-        ...collection,
-        email: user.email,
-        lastLogin: serverTimestamp()
-      }, { merge: true });
+      try {
+        setIsSyncing(true);
+        const userDocRef = doc(db, 'users', user.uid);
+        // Use updateDoc to ensure map fields (like cards) are replaced entirely,
+        // which allows deletions (selling cards) to sync correctly.
+        await updateDoc(userDocRef, {
+          ...collection,
+          email: user.email,
+          lastUpdate: serverTimestamp()
+        });
+        setTimeout(() => setIsSyncing(false), 1000);
+      } catch (error) {
+        console.error('Auto-save failed:', error);
+        setIsSyncing(false);
+      }
     }, 2000); // Debounce saves
 
     return () => clearTimeout(timer);
-  }, [collection, user, isAuthLoading]);
+  }, [collection, user, isAuthLoading, isSyncReady]);
 
   // Set activeTeamGen to current region when entering team select
   useEffect(() => {
@@ -1661,7 +1712,18 @@ function AppContent() {
               <Terminal className="w-5 h-5" />
             </button>
           )}
-          <div className="flex items-center gap-2 px-3 md:px-4 py-1.5 md:py-2 bg-[#141414] text-[#E4E3E0] rounded-full">
+          <div className="flex items-center gap-2 px-3 md:px-4 py-1.5 md:py-2 bg-[#141414] text-[#E4E3E0] rounded-full relative">
+            {user && (
+              <div className="absolute -top-1 -right-1">
+                {isSyncing ? (
+                  <RefreshCw className="w-3 h-3 text-blue-400 animate-spin" />
+                ) : isSyncReady ? (
+                  <Cloud className="w-3 h-3 text-emerald-400" />
+                ) : (
+                  <CloudOff className="w-3 h-3 text-red-400" />
+                )}
+              </div>
+            )}
             <Zap className="w-3 h-3 md:w-4 md:h-4 text-yellow-400 fill-yellow-400" />
             <span className="font-mono font-bold text-xs md:text-sm">
               {collection.isInfiniteCoins ? '∞' : collection.coins}
