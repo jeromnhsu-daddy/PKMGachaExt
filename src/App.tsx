@@ -180,6 +180,7 @@ function AppContent() {
   const [isSyncing, setIsSyncing] = useState(false);
   const lastLocalActionTime = useRef(0);
   const isSyncingFromCloud = useRef(false);
+  const isLoggingInManual = useRef(false);
 
   // Track local changes to prevent stale cloud snapshots from reverting them
   useEffect(() => {
@@ -194,10 +195,13 @@ function AppContent() {
     const unsubscribe = onAuthStateChanged(auth, async (u) => {
       setUser(u);
       setIsAuthLoading(false);
+      
       if (u) {
-        // If user is already logged in (e.g. page refresh), 
-        // we enable sync immediately to resume the session.
-        setIsSyncReady(true);
+        // CRITICAL: Only auto-enable sync if it's NOT a manual login process.
+        // Manual login (handleLogin) will handle its own sync resolution.
+        if (!isLoggingInManual.current) {
+          setIsSyncReady(true);
+        }
       } else {
         setIsSyncReady(false);
       }
@@ -263,6 +267,7 @@ function AppContent() {
 
   // Handle Login
   const handleLogin = async () => {
+    isLoggingInManual.current = true;
     try {
       const provider = new GoogleAuthProvider();
       const result = await signInWithPopup(auth, provider);
@@ -276,7 +281,7 @@ function AppContent() {
         const cloudData = snapshot.data() as CollectionState;
         setPendingCloudData(cloudData);
         setShowSyncModal(true);
-        setIsSyncReady(false); // Lock sync until user decides
+        setIsSyncReady(false); // Lock sync until user decides in modal
       } else {
         // New cloud user, upload current local progress
         await setDoc(userDocRef, {
@@ -290,6 +295,12 @@ function AppContent() {
     } catch (error) {
       console.error('Login failed:', error);
       setToast({ message: t('auth.login_failed'), type: 'error' });
+    } finally {
+      // Reset the manual login flag after a short delay to ensure 
+      // onAuthStateChanged has finished processing.
+      setTimeout(() => {
+        isLoggingInManual.current = false;
+      }, 1000);
     }
   };
 
